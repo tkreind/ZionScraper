@@ -1,0 +1,204 @@
+﻿@page "/"
+@inject HttpClient Http
+@using Append.Blazor.Notifications
+@inject INotificationService NotificationService
+@using System.Threading
+@using System.Security.Cryptography
+@inject HttpClient Http
+@using System.Text
+
+<h1>Notifications</h1>
+
+@if (!IsSupportedByBrowser)
+{
+    <p>This browser doesn't support notifications.</p>
+}
+else
+{
+    @if (Permission != PermissionType.Granted)
+    {
+        <p>This website doesn't have notification permissions.</p>
+    }
+    else
+    {
+        <p>
+            <b>Time between scrapes (Seconds):</b> <input @bind="SecondsDelay" />
+        </p>
+
+        <p>
+            <b>API URL:</b> <input style="width: 100%;" @bind="url" />
+        </p>
+
+        @if (bad)
+        {
+            <b style="color:red;">Error: bad response received.</b>
+        }
+
+        <p>
+            Last API Hash: @lastHashString
+        </p>
+
+        @if (backgroundTask == null)
+        {
+            <button class="btn btn-primary" @onclick="StartScraping">Start Scraping</button>
+
+        }
+        else
+        {
+            <button class="btn btn-primary" @onclick="StopScraping">Stop Scraping</button>
+        }
+    }
+}
+
+
+@code {
+    bool IsSupportedByBrowser;
+    PermissionType Permission;
+
+    int SecondsDelay = 5;
+
+    CancellationTokenSource canceller = new CancellationTokenSource();
+
+    Task backgroundTask = null;
+
+    string url = "https://www.recreation.gov/api/ticket/availability/facility/300016?date=2021-05-15";
+
+    byte[] lastHash = null;
+
+    bool bad = false;
+
+    string lastHashString = null;
+
+    // a function that runs in the background, not being awaited, that scrapes zion's site
+    private async Task ScrapeAsynchronously()
+    {
+        while (backgroundTask != null)
+        {
+            Console.WriteLine("Scraping");
+
+            try
+            {
+                var response = await Http.GetAsync(url);
+
+                if (response.StatusCode != System.Net.HttpStatusCode.OK)
+                {
+
+                    Console.WriteLine("Bad request");
+                    bad = true;
+                }
+                else
+                {
+
+                    Console.WriteLine("Good request");
+                    bad = false;
+
+                    using (SHA256 sha256Hash = SHA256.Create())
+                    {
+                        byte[] hash = sha256Hash.ComputeHash(await response.Content.ReadAsStreamAsync());
+
+                        bool equal = false;
+
+                        if (lastHash != null)
+                        {
+                            equal = true;
+                            if (lastHash.Length != hash.Length)
+                            {
+                                NotifyChrome();
+                                equal = false;
+                            }
+                            else
+                            {
+                                for (int i = 0; i < hash.Length; i++)
+                                {
+                                    if (lastHash[i] != hash[i])
+                                    {
+                                        equal = false;
+                                        NotifyChrome();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+
+                        Console.WriteLine("Equal: " + equal);
+
+                        if (!equal)
+                        {
+                            lastHash = hash;
+                            StringBuilder hex = new StringBuilder(lastHash.Length * 2);
+                            foreach (byte b in lastHash)
+                            {
+                                hex.AppendFormat("{0:x2}", b);
+                            }
+                            lastHashString = hex.ToString();
+
+                            this.StateHasChanged();
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                Console.WriteLine("Caught exception");
+            }
+
+            await Task.Delay(SecondsDelay * 1000, canceller.Token);
+        }
+    }
+
+    private void StartScraping()
+    {
+        if (backgroundTask == null)
+        {
+            backgroundTask = Task.Run(ScrapeAsynchronously);
+        }
+    }
+
+    private async void StopScraping()
+    {
+        if (backgroundTask != null)
+        {
+            Task waiter = backgroundTask;
+            backgroundTask = null;
+            canceller.Cancel();
+            try
+            {
+                await waiter;
+            }
+            catch (TaskCanceledException)
+            {
+
+            }
+            finally
+            {
+                canceller = new CancellationTokenSource();
+            }
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+
+        IsSupportedByBrowser = await NotificationService.IsSupportedByBrowserAsync();
+
+        if (IsSupportedByBrowser)
+        {
+            Permission = await NotificationService.RequestPermissionAsync();
+        }
+    }
+
+    private async void NotifyChrome()
+    {
+        NotificationOptions options = new NotificationOptions
+        {
+            Body = DateTime.Now.ToString(),
+            TimeOut = null,
+            Renotify = true,
+            Silent = false,
+            RequireInteraction = true,
+        };
+
+        await NotificationService.CreateAsync("Zion Site Updated", options);
+    }
+}
